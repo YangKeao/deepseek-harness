@@ -11,7 +11,7 @@ import { clientRequestSchema } from './rpc-schema.ts'
 import { bridge } from './http-bridge.ts'
 import { isTrustedApiRequest } from './api-request-trust.ts'
 import { API_PATH } from './api-path.ts'
-import type { BrowserAuth } from './browser-auth.ts'
+import { TOKEN_QUERY, type BrowserAuth } from './browser-auth.ts'
 import type {
   ConnectionIndexRequest,
   ConnectionIndexResponse,
@@ -65,12 +65,12 @@ export class HostConnectionService extends Service implements HostConnectionHand
    * Provide the Host half over the active HTTP server.
    * @param ctx - owning Connection plugin context.
    * @param trustedHosts - deployment authorities accepted by the Host/Origin fence.
-   * @param browserAuth - process token and persistent browser-session owner.
+   * @param browserAuth - process token and persistent browser-session owner; omitted in none mode.
    */
   constructor(
     ctx: Context,
     private readonly trustedHosts: readonly string[],
-    private readonly browserAuth: BrowserAuth,
+    private readonly browserAuth?: BrowserAuth,
   ) {
     super(ctx, 'connection')
   }
@@ -96,17 +96,38 @@ export class HostConnectionService extends Service implements HostConnectionHand
   /** Apply the configured Host/Origin fence, then browser authentication. */
   requestRejection(request: ConnectionTrustRequest): ConnectionRequestRejection {
     if (!isTrustedApiRequest(request, this.trustedHosts)) return 403
-    return this.browserAuth.isAuthenticated(request) ? undefined : 401
+    return this.browserAuth === undefined || this.browserAuth.isAuthenticated(request) ? undefined : 401
   }
 
-  /** Authenticate an index request through the process-token exchange or cookie. */
+  /** Apply request trust before optional process-token exchange or cookie authentication. */
   authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean {
-    return this.browserAuth.authorizeIndex(request, response)
+    if (!isTrustedApiRequest(request, this.trustedHosts)) {
+      response.writeHead(403)
+      response.end('forbidden')
+      return false
+    }
+    if (this.browserAuth !== undefined) return this.browserAuth.authorizeIndex(request, response)
+    const url = new URL(request.url ?? '/', 'http://dsh.invalid')
+    if (request.method === 'GET' && url.pathname === '/' && url.searchParams.has(TOKEN_QUERY)) {
+      response.writeHead(303, {
+        'cache-control': 'no-store',
+        'location': '/',
+        'referrer-policy': 'no-referrer',
+      })
+      response.end()
+      return false
+    }
+    return true
   }
 
-  /** Add this process's launch token to the clean application URL. */
+  /** Return the clean root application URL, adding a launch token only in browser-token mode. */
   authenticatedUrl(baseUrl: string): string {
-    return this.browserAuth.authenticatedUrl(baseUrl)
+    if (this.browserAuth !== undefined) return this.browserAuth.authenticatedUrl(baseUrl)
+    const url = new URL(baseUrl)
+    url.pathname = '/'
+    url.search = ''
+    url.hash = ''
+    return url.href
   }
 
   /**

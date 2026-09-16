@@ -7,10 +7,11 @@ import { describe, expect, it } from 'vitest'
 import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import type { IndexInjection, WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import { API_PATH, RpcId, apply, inject, type ClientRequest, type ConnectionConfig, type HostConnectionHandle } from '../src/index.ts'
+import { API_PATH, Config, RpcId, apply, inject, type ClientRequest, type ConnectionConfig, type HostConnectionHandle } from '../src/index.ts'
 import { DEFAULT_MAX_REQUEST_BODY_BYTES } from '../src/http-bridge.ts'
-import { provideBrowserCredentials } from './browser-credentials.ts'
+import { provideBrowserCredentials, RecordCredentials } from './browser-credentials.ts'
 
 /** Structural webServer fake recording both route registries. */
 function fakeHttpServer(
@@ -118,6 +119,113 @@ function browserCookie(connection: HostConnectionHandle, authority: string): str
 }
 
 describe('connection node half', () => {
+  it('defaults to browser-token and validates the explicit authentication mode', () => {
+    expect(Config({}).authentication).toBe('browser-token')
+    expect(Config({ authentication: 'none' }).authentication).toBe('none')
+    expect(Config({ authentication: 'browser-token' }).authentication).toBe('browser-token')
+    expect(() => Config({ authentication: 'disabled' } as unknown as ConnectionConfig)).toThrow()
+  })
+
+  it.each([undefined, 'browser-token', 'none'] as const)(
+    'initializes browser credentials only when authentication is enabled: %s',
+    async (authentication) => {
+      const ctx = new Context()
+      const credentials = new RecordCredentials()
+      ctx.provide('credentials', credentials as unknown as CredentialProvider)
+      const fiber = ctx.plugin({ inject: [...inject], apply }, authentication === undefined ? {} : { authentication })
+      try {
+        await fiber.await()
+        const connection = ctx.get('connection') as HostConnectionHandle
+        const url = new URL(connection.authenticatedUrl('http://localhost:3080/old?token=stale&view=x#fragment'))
+        expect(url.pathname).toBe('/')
+        expect(url.hash).toBe('')
+        expect(credentials.modifies).toBe(authentication === 'none' ? 0 : 1)
+        expect(credentials.reads).toBe(0)
+        if (authentication === 'none') {
+          expect(credentials.record).toBeUndefined()
+          expect(url.href).toBe('http://localhost:3080/')
+        } else {
+          expect(credentials.record?.kind).toBe('grant')
+          expect([...url.searchParams.keys()]).toEqual(['token'])
+          expect(url.searchParams.get('token')).not.toBe('stale')
+          const cookie = browserCookie(connection, 'localhost:3080')
+          expect(connection.requestRejection(fakeRequest({ host: 'localhost:3080', cookie }))).toBeUndefined()
+        }
+      } finally {
+        await fiber.dispose()
+      }
+    },
+  )
+
+  it('serves trusted index and API requests without browser credentials in none mode', async () => {
+    const { connection, routes, dispose } = await mounted({ authentication: 'none', trustedHosts: ['harness.example'] })
+    try {
+      connection.fetch.register({
+        path: '/api/test', methods: ['GET'], requestBody: 'buffered',
+        fetch: () => Promise.resolve(new Response('accepted')),
+      })
+      for (const host of ['localhost:3080', 'harness.example']) {
+        for (const cookie of [undefined, 'dsh-auth-stale=invalid']) {
+          const headers = { host, ...cookie === undefined ? {} : { cookie } }
+          const index = fakeResponse()
+          expect(connection.authorizeIndex(fakeRequest(headers, '/'), index.response)).toBe(true)
+          expect(index.state).toEqual({})
+          const api = fakeResponse()
+          await routes[0]!.handler(fakeRequest(headers, '/api/test'), api.response)
+          expect(api.state).toMatchObject({ status: 200, body: 'accepted' })
+          expect(api.state.headers?.['set-cookie']).toBeUndefined()
+        }
+      }
+    } finally {
+      await dispose()
+    }
+  })
+
+  it.each(['browser-token', 'none'] as const)('checks index trust before authentication or cleanup: %s', async (authentication) => {
+    const { connection, dispose } = await mounted({ authentication, trustedHosts: ['harness.example'] })
+    try {
+      const launch = new URL(connection.authenticatedUrl('http://harness.example'))
+      const path = authentication === 'none' ? '/?token=legacy' : launch.pathname + launch.search
+      for (const headers of [
+        {},
+        { host: 'evil.example' },
+        { host: 'harness.example', origin: 'https://evil.example' },
+        { host: 'harness.example', 'sec-fetch-site': 'cross-site' },
+      ]) {
+        const denied = fakeResponse()
+        expect(connection.authorizeIndex(fakeRequest(headers, path), denied.response)).toBe(false)
+        expect(denied.state).toEqual({ status: 403, body: 'forbidden' })
+        expect(connection.requestRejection(fakeRequest(headers))).toBe(403)
+      }
+    } finally {
+      await dispose()
+    }
+  })
+
+  it('cleans legacy root GET token URLs without minting a cookie in none mode', async () => {
+    const { connection, dispose } = await mounted({ authentication: 'none' })
+    try {
+      for (const path of ['/?token=old&view=x', '/?token=', '/?token=one&token=two']) {
+        const result = fakeResponse()
+        expect(connection.authorizeIndex(fakeRequest({ host: 'localhost' }, path), result.response)).toBe(false)
+        expect(result.state).toEqual({
+          status: 303,
+          headers: { 'cache-control': 'no-store', 'location': '/', 'referrer-policy': 'no-referrer' },
+        })
+      }
+      for (const [method, url] of [
+        ['GET', '/?view=x'], ['GET', '/index.html?token=old'], ['HEAD', '/?token=old'], ['POST', '/?token=old'],
+      ]) {
+        const result = fakeResponse()
+        expect(connection.authorizeIndex({ method, url, headers: { host: 'localhost' } }, result.response)).toBe(true)
+        expect(result.state).toEqual({})
+      }
+      expect(connection.authorizeIndex({ method: 'GET', headers: { host: 'localhost' } }, fakeResponse().response)).toBe(true)
+    } finally {
+      await dispose()
+    }
+  })
+
   it('provides the carrier-neutral service without a Web server', async () => {
     const ctx = new Context()
     provideBrowserCredentials(ctx)

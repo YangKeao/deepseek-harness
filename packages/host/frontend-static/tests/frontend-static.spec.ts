@@ -7,6 +7,7 @@
  */
 
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -29,8 +30,8 @@ afterEach(async () => {
   root = undefined
 })
 
-/** Write a dist fixture and the authenticated Web rows, then boot them through the real Loader. */
-async function loadComposition(): Promise<Context> {
+/** Write a dist fixture and Web rows, then boot them through the real Loader. */
+async function loadComposition(authentication?: Connection.ConnectionConfig['authentication']): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-frontend-static-'))
   const dist = join(root, 'dist')
   await mkdir(dist)
@@ -51,6 +52,9 @@ async function loadComposition(): Promise<Context> {
     "    host: '127.0.0.1'",
     '    port: 0',
     "- name: '@deepseek-ai/dsh-client-connection'",
+    '  config:',
+    "    trustedHosts: ['harness.example']",
+    ...(authentication === undefined ? [] : [`    authentication: '${authentication}'`]),
     '- id: frontend',
     "  name: '@deepseek-ai/dsh-host-frontend-static'",
     '  config:',
@@ -93,7 +97,88 @@ async function request(port: number, path: string, init?: RequestInit): Promise<
   }
 }
 
+/** Send caller-controlled Host headers without Fetch's forbidden-header normalization. */
+function rawRequest(url: string, headers: Record<string, string>): Promise<{
+  status: number | undefined
+  headers: IncomingHttpHeaders
+  body: string
+}> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(url, { headers }, (response) => {
+      let body = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk: string) => { body += chunk })
+      response.on('error', reject)
+      response.on('end', () => { resolve({ status: response.statusCode, headers: response.headers, body }) })
+    })
+    request.on('error', reject)
+    request.end()
+  })
+}
+
 describe('real Loader composition', () => {
+  it('serves none-mode index and API without cookies while retaining request trust', { timeout: 60_000 }, async () => {
+    const loaded = await loadComposition('none')
+    const baseUrl = `http://127.0.0.1:${String(loaded.webServer.port)}`
+    expect(loaded.connection.authenticatedUrl(`${baseUrl}/old?token=stale#fragment`)).toBe(`${baseUrl}/`)
+    loaded.connection.fetch.register({
+      path: '/api/test', methods: ['GET'], requestBody: 'buffered',
+      fetch: () => Promise.resolve(new Response('accepted')),
+    })
+    for (const path of ['/', '/index.html', '/api/test']) {
+      const response = await fetch(baseUrl + path)
+      expect(response.status).toBe(200)
+      expect(response.headers.get('set-cookie')).toBeNull()
+      expect(await response.text()).toContain(path === '/api/test' ? 'accepted' : 'shell')
+    }
+    for (const host of ['harness.example', 'localhost']) {
+      expect((await rawRequest(baseUrl, { host })).status).toBe(200)
+    }
+    const cleanup = await fetch(`${baseUrl}/?token=stale&view=old`, { redirect: 'manual' })
+    expect(cleanup.status).toBe(303)
+    expect(cleanup.headers.get('location')).toBe('/')
+    expect(cleanup.headers.get('cache-control')).toBe('no-store')
+    expect(cleanup.headers.get('referrer-policy')).toBe('no-referrer')
+    expect(cleanup.headers.get('set-cookie')).toBeNull()
+    expect(await cleanup.text()).toBe('')
+
+    for (const path of ['/', '/index.html', '/?token=stale', '/api/test']) {
+      for (const headers of [
+        { host: 'evil.example' },
+        { origin: 'https://evil.example' },
+        { 'sec-fetch-site': 'cross-site' },
+      ]) {
+        const response = await rawRequest(baseUrl + path, headers)
+        expect(response.status).toBe(403)
+        expect(response.headers['set-cookie']).toBeUndefined()
+        expect(response.body).toBe('forbidden')
+      }
+    }
+  })
+
+  it('rejects untrusted index requests even with a valid default-mode launch token or cookie', { timeout: 60_000 }, async () => {
+    const loaded = await loadComposition()
+    const baseUrl = `http://127.0.0.1:${String(loaded.webServer.port)}`
+    const launchUrl = loaded.connection.authenticatedUrl(baseUrl)
+    for (const headers of [{ host: 'evil.example' }, { origin: 'https://evil.example' }, { 'sec-fetch-site': 'cross-site' }]) {
+      const denied = await rawRequest(launchUrl, headers)
+      expect(denied.status).toBe(403)
+      expect(denied.headers['set-cookie']).toBeUndefined()
+    }
+    const exchange = await fetch(launchUrl, { redirect: 'manual' })
+    expect(exchange.status).toBe(303)
+    const cookie = exchange.headers.get('set-cookie')!.split(';', 1)[0]!
+    for (const path of ['/', '/index.html', '/api/test']) {
+      expect((await fetch(baseUrl + path, { headers: { cookie, origin: 'https://evil.example' } })).status).toBe(403)
+      expect((await fetch(baseUrl + path)).status).toBe(401)
+    }
+    const cleanup = await fetch(`${baseUrl}/?token=obsolete`, { headers: { cookie }, redirect: 'manual' })
+    expect(cleanup.status).toBe(303)
+    expect(cleanup.headers.get('location')).toBe('/')
+    expect(cleanup.headers.get('set-cookie')).toBeNull()
+    expect((await fetch(baseUrl, { headers: { cookie } })).status).toBe(200)
+  })
+
   it('serves explicit index entries and files while preserving HTTP error semantics', { timeout: 60_000 }, async () => {
     const loaded = await loadComposition()
     const unloaded = [...loaded.loader.entries()]

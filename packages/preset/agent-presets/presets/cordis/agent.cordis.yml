@@ -132,6 +132,18 @@
   config:
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
+      # Summarization is pinned to the DeepSeek route instead of inheriting the
+      # conversation's route. A summary request replays the shadowed prefix plus
+      # every tool schema, so an inherited route whose real capacity is below
+      # the conversation's size cannot summarize the very overflow it must
+      # resolve: the summary request fails with the same context error, no
+      # summary is committed, and each retry repeats the failure. DeepSeek's
+      # 1M-token route has the headroom to summarize a conversation that
+      # overflowed a smaller provider. Replace both fields to route summaries
+      # elsewhere; the pair must stay non-empty or the routed model wins again.
+      config:
+        summarizationProvider: deepseek-official
+        summarizationModel: deepseek-flash
 
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'

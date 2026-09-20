@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-20-saturated-provider-retry-and-pinned-summary-route.md
+2026-09-20-saturated-provider-retry-and-pinned-summary-route.md: bafd9b51e345fae3abb67511d326e5c3343a9cbc
+2026-09-20-saturated-provider-retry-and-pinned-summary-route.zh.md: bf4ef19d16f4f1f954bf3ef83b30123dbde14100

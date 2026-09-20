@@ -925,6 +925,28 @@ describe('mapStopReason / mapUsage', () => {
   })
 
   it.each([
+    // The ChatGPT/Codex backend sheds load with this exact sentence and no
+    // status code, so the transient classification has to come from the wording.
+    'Codex error: Our servers are currently overloaded. Please try again later.',
+    // The same backend also names per-model serving capacity.
+    'Selected model is at capacity. Please try a different model.',
+    'HTTP 503: service unavailable',
+    'The upstream provider is temporarily unavailable, retry shortly',
+  ])('classifies provider saturation wording %j as a retryable SERVER failure', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+  })
+
+  it('keeps context overflow ahead of saturation wording', () => {
+    // pi-ai's own overflow text must stay non-retryable even when a gateway
+    // decorates the response with load-shedding wording.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'Input exceeds the model context window limit (server overloaded)',
+    }))).toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE } })
+  })
+
+  it.each([
     'other side closed',
     'HTTP2 request did not get a response',
     'WebSocket closed unexpectedly',

@@ -47,6 +47,13 @@ function classifyPiAiError(message: string): string {
   // same request cannot succeed, so it is invalid, not transient.
   if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
   if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
+  // Provider-side saturation that no request body can fix: the gateway is
+  // shedding load, or the account's model is out of serving capacity for now.
+  // `"Codex error: Our servers are currently overloaded. Please try again
+  // later."` is the load-shedding wording that reaches us without any status
+  // code or transport word, so it lands here instead of the terminal
+  // `PI_AI_ERROR` fallback that no default retry policy accepts.
+  if (/\b(?:overloaded|at\s+capacity|temporarily\s+unavailable|service\s+unavailable)\b/i.test(message)) return 'SERVER'
   if (/\b5\d\d\b/.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
   // A stream truncated before the provider's terminal event: each pi-ai provider

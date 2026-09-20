@@ -12,7 +12,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, assert, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -121,6 +121,33 @@ describe('llm-pi-ai real dormant composition', () => {
     const result = await assemble(ctx, { provider: 'deepseek', model: 'deepseek-v4-flash', messages: [] })
     expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
     expect(server.headers[0]?.authorization).toBe('Bearer key-from-store')
+  })
+
+  it('exposes generic WebSocket failures as eligible for the normal retry policy', async () => {
+    vi.stubEnv('PI_COMPOSITION_KEY', '')
+    // The external provider supplies the flattened message; no classifier or
+    // adapter is mocked, and the Loader owns the runtime composition.
+    const server = await mockServer([{ events: [JSON.stringify({ error: { message: 'WebSocket error' } })] }])
+    const { ctx, settingsPath } = await loadComposition()
+    await writeFile(settingsPath, [
+      'llm-pi-ai:',
+      '  providers:',
+      '    deepseek:',
+      '      apiKeyEnv: PI_COMPOSITION_KEY',
+      `      baseURL: ${server.url}`,
+      '',
+    ].join('\n'))
+    await vi.waitFor(() => {
+      expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['deepseek'])
+    }, { timeout: 5000 })
+
+    const result = await assemble(ctx, { provider: 'deepseek', model: 'deepseek-v4-flash', messages: [] })
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
+    const policy = ctx.llm.providerRetryPolicy('deepseek')
+    assert(policy.mode === 'normal')
+    expect(policy.maxRetries).toBe(5)
+    expect(policy.retryableCodes).toContain('TRANSPORT')
+    expect(server.requests).toHaveLength(1)
   })
 
   it('uses settings-only route headers for model discovery', async () => {

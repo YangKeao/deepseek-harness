@@ -112,6 +112,8 @@ profile 通过可选 settings seam 每次操作重新读取：base 与用户的 
 
 ### 失败与恢复
 
+泛化的 `WebSocket error` 失败携带 `TRANSPORT`，可由 normal 重试策略处理。更具体的认证、配额、无效请求和上下文溢出错误保留各自的 code；其他未知提供方失败仍为 `PI_AI_ERROR`，默认不重试。此分类不改变已配置的流式传输方式。
+
 pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
 
 Settings 写入会在合并组合层与用户层后严格校验每个新增或修改的提供方。命名空间注册时，已存储配置的目录解析错误会保留命名空间与提供方行，并通过 `LlmConfigurableProvider.error` 优先返回首个模型诊断，无模型诊断时返回路由错误；未修改的错误提供方不会阻止其他编辑。可解析的模型仍可选择，无法解析的模型保留在可编辑配置中，直接请求时会在网络 I/O 前以 `INVALID_CONFIG` 失败。修复或删除错误配置会清除诊断。Schema 与 profile 自身的约束错误仍会拒绝加载。后续外部文件编辑会校验变化的提供方，失败时保留最后一次接受的分节。

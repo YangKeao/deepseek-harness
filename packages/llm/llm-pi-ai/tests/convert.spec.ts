@@ -950,6 +950,9 @@ describe('mapStopReason / mapUsage', () => {
     'other side closed',
     'HTTP2 request did not get a response',
     'WebSocket closed unexpectedly',
+    'WebSocket error',
+    'websocket error',
+    'Codex transport: WebSocket error',
     // undici flattens a mid-stream socket drop to this bare word (its SocketError
     // cause is discarded upstream before it reaches us).
     'terminated',
@@ -962,6 +965,19 @@ describe('mapStopReason / mapUsage', () => {
   ])('maps pi-ai transport wording %j', (errorMessage) => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
       .toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
+  })
+
+  it.each([
+    ['WebSocket error: HTTP 401', 'AUTH'],
+    ['WebSocket error: HTTP 403', 'AUTH'],
+    ['WebSocket error: HTTP 400 invalid request', 'INVALID_REQUEST'],
+    ['WebSocket error: HTTP 413 Payload Too Large', 'INVALID_REQUEST'],
+    ['WebSocket error: insufficient_quota', 'QUOTA'],
+    ['WebSocket error: input exceeds the model context window limit', CONTEXT_WINDOW_EXCEEDED_CODE],
+    ['Unsupported WebSocket protocol', 'PI_AI_ERROR'],
+  ])('preserves specific or unknown failures for %j', (errorMessage, code) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toEqual({ kind: 'error', failure: { message: errorMessage, code } })
   })
 
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {
